@@ -21,6 +21,11 @@ const (
 	inputSize = 320
 )
 
+var (
+	mean = [3]float32{0.485, 0.456, 0.406}
+	std  = [3]float32{0.229, 0.224, 0.225}
+)
+
 // RemBG handles background removal operations
 type RemBG struct {
 	session     *ort.AdvancedSession
@@ -107,17 +112,17 @@ func (r *RemBG) RemoveBackground(img image.Image) (image.Image, error) {
 	inputData := r.inputTensor.GetData()
 	idx := 0
 	for c := range 3 {
-		for y := 0; y < inputSize; y++ {
-			for x := 0; x < inputSize; x++ {
+		for y := range inputSize {
+			for x := range inputSize {
 				rv, gv, bv, _ := resized.At(x, y).RGBA()
 				var val float32
 				switch c {
 				case 0:
-					val = float32(rv>>8) / 255.0
+					val = (float32(rv>>8)/255.0 - mean[0]) / std[0]
 				case 1:
-					val = float32(gv>>8) / 255.0
+					val = (float32(gv>>8)/255.0 - mean[1]) / std[1]
 				case 2:
-					val = float32(bv>>8) / 255.0
+					val = (float32(bv>>8)/255.0 - mean[2]) / std[2]
 				}
 				inputData[idx] = val
 				idx++
@@ -280,10 +285,11 @@ func refineMask(mask *image.Gray) *image.Gray {
 }
 
 func otsuThreshold(data []float32) float32 {
-	// build histogram (256 bins)
 	hist := make([]int, 256)
 	for _, v := range data {
-		val := int(v * 255.0)
+		// Apply sigmoid first
+		s := 1.0 / (1.0 + float32(math.Exp(float64(-v))))
+		val := int(s * 255.0)
 		val = max(val, 0)
 		val = min(val, 255)
 		hist[val]++
@@ -314,45 +320,6 @@ func otsuThreshold(data []float32) float32 {
 			threshold = t
 		}
 	}
-	result := float32(threshold) / 255.0
-	mean, variance := meanVar(data)
-	fmt.Printf("Mask mean=%.4f variance=%.4f\n", mean, variance)
 
-	// Then adjust aggressiveness:
-	aggressiveness := 0.0
-	if mean < 0.3 {
-		aggressiveness += 0.15
-	} else if mean < 0.5 {
-		aggressiveness += 0.08
-	}
-	if variance < 0.02 {
-		aggressiveness += 0.1
-	}
-	thresh := result + float32(aggressiveness)
-	if thresh > 0.95 {
-		thresh = 0.95
-	}
-	return thresh
-}
-
-func meanVar(data []float32) (mean float64, variance float64) {
-	n := float64(len(data))
-	if n == 0 {
-		return 0, 0
-	}
-
-	sum := 0.0
-	for _, v := range data {
-		sum += float64(v)
-	}
-	mean = sum / n
-
-	varSum := 0.0
-	for _, v := range data {
-		diff := float64(v) - mean
-		varSum += diff * diff
-	}
-	variance = varSum / n
-
-	return mean, variance
+	return float32(threshold) / 255.0
 }
