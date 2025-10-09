@@ -8,7 +8,14 @@ import (
 )
 
 func main() {
-	engine, err := rmbg.New("./models/u2netp.onnx")
+	cfg := &rmbg.Config{
+		IntraOpNumThreads: 1,
+		InterOpNumThreads: 1,
+		CpuMemArena:       false,
+		MemPattern:        true,
+		ModelPath:         "./models/u2netp.onnx",
+	}
+	engine, err := rmbg.New(cfg)
 	if err != nil {
 		panic(err)
 	}
@@ -20,7 +27,6 @@ func main() {
 		panic(fmt.Errorf("erro ao abrir imagem: %w", err))
 	}
 
-	// Remove o fundo
 	newImage, err := engine.RemoveBackground(img)
 	if err != nil {
 		panic(fmt.Errorf("erro ao remover fundo: %w", err))

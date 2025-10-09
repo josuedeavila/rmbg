@@ -34,6 +34,20 @@ var (
 	std        = [3]float32{0.229, 0.224, 0.225}
 )
 
+// Config for RemBG
+type Config struct {
+	// ModelPath is the path to the ONNX model file.
+	ModelPath string
+	// IntraOpNumThreads is the number of threads to use for intra-op parallelism.
+	IntraOpNumThreads int
+	// InterOpNumThreads is the number of threads to use for inter-op parallelism.
+	InterOpNumThreads int
+	// CpuMemArena is a flag indicating whether to use a CPU memory arena.
+	CpuMemArena bool
+	// MemPattern is a flag indicating whether to use a memory pattern.
+	MemPattern bool
+}
+
 // RemBG with session reuse and memory pooling
 type RemBG struct {
 	modelPath  string
@@ -43,23 +57,46 @@ type RemBG struct {
 	blurPool   *blurBufferPool
 }
 
-func createSession(modelPath string) (*ort.DynamicAdvancedSession, error) {
+func createSession(config *Config) (*ort.DynamicAdvancedSession, error) {
 	options, err := ort.NewSessionOptions()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session options: %w", err)
 	}
-	defer options.Destroy()
+	func() {
+		_ = options.Destroy()
+	}()
 
-	// Configure for minimal memory usage
-	options.SetIntraOpNumThreads(2)
-	options.SetInterOpNumThreads(1)
-	options.SetCpuMemArena(false)
-	options.SetMemPattern(true)
-	options.SetExecutionMode(ort.ExecutionModeSequential)
-	options.SetGraphOptimizationLevel(ort.GraphOptimizationLevelEnableAll)
+	err = options.SetIntraOpNumThreads(config.IntraOpNumThreads)
+	if err != nil {
+		return nil, fmt.Errorf("failed to set intra-op num threads: %w", err)
+	}
+	err = options.SetInterOpNumThreads(config.InterOpNumThreads)
+	if err != nil {
+		return nil, fmt.Errorf("failed to set inter-op num threads: %w", err)
+	}
+	err = options.SetIntraOpNumThreads(config.IntraOpNumThreads)
+	if err != nil {
+		return nil, fmt.Errorf("failed to set intra-op num threads: %w", err)
+	}
+	err = options.SetCpuMemArena(config.CpuMemArena)
+	if err != nil {
+		return nil, fmt.Errorf("failed to set cpu memory arena: %w", err)
+	}
+	err = options.SetMemPattern(config.MemPattern)
+	if err != nil {
+		return nil, fmt.Errorf("failed to set memory pattern: %w", err)
+	}
+	err = options.SetExecutionMode(ort.ExecutionModeParallel)
+	if err != nil {
+		return nil, fmt.Errorf("failed to set execution mode: %w", err)
+	}
+	err = options.SetGraphOptimizationLevel(ort.GraphOptimizationLevelEnableAll)
+	if err != nil {
+		return nil, fmt.Errorf("failed to set graph optimization level: %w", err)
+	}
 
 	session, err := ort.NewDynamicAdvancedSession(
-		modelPath,
+		config.ModelPath,
 		[]string{"input.1"},
 		[]string{"1959"},
 		options,
@@ -71,22 +108,22 @@ func createSession(modelPath string) (*ort.DynamicAdvancedSession, error) {
 	return session, nil
 }
 
-// NewRemBG initializes ONNX session with memory pooling
-func New(modelPath string) (*RemBG, error) {
-	session, err := createSession(modelPath)
+// NewRemBG initializes ONNX session
+func New(config *Config) (*RemBG, error) {
+	session, err := createSession(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ONNX session: %w", err)
 	}
 
 	return &RemBG{
-		modelPath:  modelPath,
+		modelPath:  config.ModelPath,
 		session:    session,
 		tensorPool: newTensorPool(),
 		blurPool:   newBlurBufferPool(),
 	}, nil
 }
 
-// Close destroys the session
+// Close destroys the session and releases resources
 func (r *RemBG) Close() error {
 	if r.session != nil {
 		return r.session.Destroy()
@@ -104,7 +141,7 @@ func (r *RemBG) RemoveBackground(img image.Image) (image.Image, error) {
 	}()
 
 	resized := imaging.Resize(img, inputSize, inputSize, imaging.Linear)
-	nrgba := imaging.Clone(resized) // ensures it's *image.NRGBA
+	nrgba := imaging.Clone(resized)
 	pix := nrgba.Pix
 	stride := nrgba.Stride
 
@@ -194,7 +231,6 @@ func blendParallel(dst *image.RGBA, src image.Image, mask *image.Gray) {
 	wg.Wait()
 }
 
-// Optimized resize with flat arrays instead of 2D slices
 func (r *RemBG) resizeGrayBlur5O(src *image.Gray, newW, newH int) *image.Gray {
 	srcB := src.Bounds()
 	dst := image.NewGray(image.Rect(0, 0, newW, newH))
@@ -202,7 +238,6 @@ func (r *RemBG) resizeGrayBlur5O(src *image.Gray, newW, newH int) *image.Gray {
 	xRatio := float64(srcB.Dx()) / float64(newW)
 	yRatio := float64(srcB.Dy()) / float64(newH)
 
-	// Get buffer from pool
 	bufSize := newW * newH
 	buf := r.blurPool.get(bufSize)
 	defer r.blurPool.put(buf)
