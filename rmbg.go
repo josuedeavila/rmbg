@@ -1,294 +1,299 @@
-package bgrm
+package rmbg
 
 import (
 	"fmt"
 	"image"
 	"image/color"
-	_ "image/jpeg"
-	"image/png"
-	"io"
+	"log"
 	"math"
-	"net/http"
-	"os"
-	"path/filepath"
+	"runtime"
+	"sync"
 
-	"github.com/nfnt/resize"
+	"github.com/disintegration/imaging"
 	ort "github.com/yalue/onnxruntime_go"
 )
 
+func init() {
+	for i := range 255 {
+		v := float32(i)/255.0*12.0 - 6.0
+		sigmoidLUT[i] = 1.0 / (1.0 + float32(math.Exp(float64(-v))))
+	}
+
+	if err := ort.InitializeEnvironment(); err != nil {
+		log.Panicf("failed to init ORT env: %v", err)
+	}
+}
+
 const (
-	modelURL  = "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx"
 	inputSize = 320
 )
 
 var (
-	mean = [3]float32{0.485, 0.456, 0.406}
-	std  = [3]float32{0.229, 0.224, 0.225}
+	sigmoidLUT [256]float32
+	mean       = [3]float32{0.485, 0.456, 0.406}
+	std        = [3]float32{0.229, 0.224, 0.225}
 )
 
-// RemBG handles background removal operations
+// RemBG with session reuse and memory pooling
 type RemBG struct {
-	session     *ort.AdvancedSession
-	modelPath   string
-	inputTensor *ort.Tensor[float32]
-	outputs     []*ort.Tensor[float32] // store all outputs here
+	modelPath  string
+	session    *ort.DynamicAdvancedSession
+	sessionMu  sync.Mutex
+	tensorPool *tensorPool
+	blurPool   *blurBufferPool
 }
 
-func New(modelDir string) (*RemBG, error) {
-	if err := ort.InitializeEnvironment(); err != nil {
-		return nil, fmt.Errorf("failed to initialize ONNX runtime: %w", err)
-	}
-
-	if err := os.MkdirAll(modelDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create model directory: %w", err)
-	}
-
-	modelPath := filepath.Join(modelDir, "u2netp.onnx")
-
-	// Download model if it doesn't exist
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		fmt.Println("Downloading U2-Net model...")
-		if err := downloadModel(modelURL, modelPath); err != nil {
-			return nil, fmt.Errorf("failed to download model: %w", err)
-		}
-		fmt.Println("Model downloaded successfully")
-	}
-
-	// Input tensor
-	inputTensor, err := ort.NewTensor(
-		ort.NewShape(1, 3, inputSize, inputSize),
-		make([]float32, 1*3*inputSize*inputSize),
-	)
+func createSession(modelPath string) (*ort.DynamicAdvancedSession, error) {
+	options, err := ort.NewSessionOptions()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create input tensor: %w", err)
+		return nil, fmt.Errorf("failed to create session options: %w", err)
 	}
+	defer options.Destroy()
 
-	outputNames := []string{"1959", "1960", "1961", "1962", "1963", "1964", "1965"}
-	outputTensors := []*ort.Tensor[float32]{}
-	for _, name := range outputNames {
-		t, e := ort.NewTensor(
-			ort.NewShape(1, 1, inputSize, inputSize),
-			make([]float32, inputSize*inputSize),
-		)
-		if e != nil {
-			return nil, fmt.Errorf("failed to create output tensor %s: %w", name, e)
-		}
-		outputTensors = append(outputTensors, t)
-	}
+	// Configure for minimal memory usage
+	options.SetIntraOpNumThreads(2)
+	options.SetInterOpNumThreads(1)
+	options.SetCpuMemArena(false)
+	options.SetMemPattern(true)
+	options.SetExecutionMode(ort.ExecutionModeSequential)
+	options.SetGraphOptimizationLevel(ort.GraphOptimizationLevelEnableAll)
 
-	values := make([]ort.Value, len(outputTensors))
-	for i, t := range outputTensors {
-		values[i] = t
-	}
-
-	session, err := ort.NewAdvancedSession(
+	session, err := ort.NewDynamicAdvancedSession(
 		modelPath,
 		[]string{"input.1"},
-		outputNames,
-		[]ort.ArbitraryTensor{inputTensor},
-		values,
-		nil,
+		[]string{"1959"},
+		options,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ONNX session: %w", err)
 	}
 
+	return session, nil
+}
+
+// NewRemBG initializes ONNX session with memory pooling
+func NewRemBG(modelPath string) (*RemBG, error) {
+	session, err := createSession(modelPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ONNX session: %w", err)
+	}
+
 	return &RemBG{
-		session:     session,
-		modelPath:   modelPath,
-		inputTensor: inputTensor,
-		outputs:     outputTensors,
+		modelPath:  modelPath,
+		session:    session,
+		tensorPool: newTensorPool(),
+		blurPool:   newBlurBufferPool(),
 	}, nil
 }
 
-// RemoveBackground removes the background from an image and replaces it with white
+// Close destroys the session
+func (r *RemBG) Close() error {
+	if r.session != nil {
+		return r.session.Destroy()
+	}
+	return ort.DestroyEnvironment()
+}
+
+// RemoveBackground processes image with memory pooling
 func (r *RemBG) RemoveBackground(img image.Image) (image.Image, error) {
-	bounds := img.Bounds()
+	inputTensor := r.tensorPool.getInput()
+	outputTensor := r.tensorPool.getOutput()
+	defer func() {
+		r.tensorPool.putInput(inputTensor)
+		r.tensorPool.putOutput(outputTensor)
+	}()
 
-	// Resize image to model input size
-	resized := resize.Resize(inputSize, inputSize, img, resize.Lanczos3)
+	resized := imaging.Resize(img, inputSize, inputSize, imaging.Linear)
+	nrgba := imaging.Clone(resized) // ensures it's *image.NRGBA
+	pix := nrgba.Pix
+	stride := nrgba.Stride
 
-	// Normalize and convert to CHW format
-	inputData := r.inputTensor.GetData()
-	idx := 0
-	for c := range 3 {
-		for y := range inputSize {
-			for x := range inputSize {
-				rv, gv, bv, _ := resized.At(x, y).RGBA()
-				var val float32
-				switch c {
-				case 0:
-					val = (float32(rv>>8)/255.0 - mean[0]) / std[0]
-				case 1:
-					val = (float32(gv>>8)/255.0 - mean[1]) / std[1]
-				case 2:
-					val = (float32(bv>>8)/255.0 - mean[2]) / std[2]
-				}
-				inputData[idx] = val
-				idx++
-			}
+	inputData := inputTensor.GetData()
+	for y := range inputSize {
+		row := pix[y*stride : y*stride+inputSize*4]
+		for x := range inputSize {
+			base := x * 4
+			r := (float32(row[base+0])/255.0 - mean[0]) / std[0]
+			g := (float32(row[base+1])/255.0 - mean[1]) / std[1]
+			b := (float32(row[base+2])/255.0 - mean[2]) / std[2]
+			inputData[(0*inputSize+y)*inputSize+x] = r
+			inputData[(1*inputSize+y)*inputSize+x] = g
+			inputData[(2*inputSize+y)*inputSize+x] = b
 		}
 	}
 
-	// Run inference
-	if err := r.session.Run(); err != nil {
+	err := r.RunInference([]ort.Value{inputTensor}, []ort.Value{outputTensor})
+	if err != nil {
 		return nil, fmt.Errorf("inference failed: %w", err)
 	}
 
-	data := make([]float32, inputSize*inputSize)
-	for _, out := range r.outputs {
-		o := out.GetData()
-		for i := range data {
-			data[i] += o[i]
-		}
-	}
-	for i := range data {
-		data[i] /= float32(len(r.outputs)) // average
-	}
-
-	// Build soft mask image (float alpha 0–1)
+	data := outputTensor.GetData()
 	maskImg := image.NewGray(image.Rect(0, 0, inputSize, inputSize))
-	treshHold := otsuThreshold(data)
+	threshold := otsuThreshold(data)
+
 	for i, v := range data {
-		s := 1.0 / (1.0 + float32(math.Exp(float64(-v)))) // sigmoid (0–1)
-		if s > treshHold {
+		s := 1.0 / (1.0 + float32(math.Exp(float64(-v))))
+		if s > threshold {
 			s = 1.0
 		} else {
 			s = 0.0
 		}
 		val := uint8(s * 255)
 		maskImg.SetGray(i%inputSize, i/inputSize, color.Gray{Y: val})
-
 	}
 
-	// Resize mask to original size
-	resizedMask := resize.Resize(uint(bounds.Dx()), uint(bounds.Dy()), maskImg, resize.Lanczos3)
-	resizedMask = refineMask(resizedMask.(*image.Gray))
+	bounds := img.Bounds()
+	resizedMask := r.resizeGrayBlur5O(maskImg, bounds.Dx(), bounds.Dy())
 
 	output := image.NewRGBA(bounds)
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			rv, gv, bv, _ := img.At(x, y).RGBA()
-			alpha := float64(resizedMask.At(x, y).(color.Gray).Y) / 255.0
-			rOut := uint8(alpha*float64(rv>>8) + (1-alpha)*255)
-			gOut := uint8(alpha*float64(gv>>8) + (1-alpha)*255)
-			bOut := uint8(alpha*float64(bv>>8) + (1-alpha)*255)
-
-			output.SetRGBA(x, y, color.RGBA{
-				R: rOut,
-				G: gOut,
-				B: bOut,
-				A: 255,
-			})
-		}
-	}
+	blendParallel(output, img, resizedMask)
 
 	return output, nil
 }
 
-// RemoveBackgroundFromFile loads an image file and removes its background
-func (r *RemBG) RemoveBackgroundFromFile(inputPath, outputPath string) error {
-	file, err := os.Open(inputPath)
-	if err != nil {
-		return fmt.Errorf("failed to open input file: %w", err)
+func blendParallel(dst *image.RGBA, src image.Image, mask *image.Gray) {
+	bounds := src.Bounds()
+	numCPU := runtime.NumCPU()
+	var wg sync.WaitGroup
+	chunk := (bounds.Dy() + numCPU - 1) / numCPU
+
+	for i := range runtime.NumCPU() {
+		startY := i * chunk
+		endY := min(startY+chunk, bounds.Dy())
+		if startY >= endY {
+			continue
+		}
+
+		wg.Go(func() {
+			for y := startY; y < endY; y++ {
+				for x := bounds.Min.X; x < bounds.Max.X; x++ {
+					rv, gv, bv, _ := src.At(x, y).RGBA()
+					alpha := float64(mask.GrayAt(x, y).Y) / 255.0
+					rOut := uint8(alpha*float64(rv>>8) + (1-alpha)*255)
+					gOut := uint8(alpha*float64(gv>>8) + (1-alpha)*255)
+					bOut := uint8(alpha*float64(bv>>8) + (1-alpha)*255)
+					dst.SetRGBA(x, y, color.RGBA{R: rOut, G: gOut, B: bOut, A: 255})
+				}
+			}
+		})
+
+		wg.Go(func() {
+			for y := startY; y < endY; y++ {
+				for x := bounds.Min.X; x < bounds.Max.X; x++ {
+					rv, gv, bv, _ := src.At(x, y).RGBA()
+					alpha := float64(mask.GrayAt(x, y).Y) / 255.0
+					rOut := uint8(alpha*float64(rv>>8) + (1-alpha)*255)
+					gOut := uint8(alpha*float64(gv>>8) + (1-alpha)*255)
+					bOut := uint8(alpha*float64(bv>>8) + (1-alpha)*255)
+					dst.SetRGBA(x, y, color.RGBA{R: rOut, G: gOut, B: bOut, A: 255})
+				}
+			}
+		})
 	}
-	defer file.Close()
 
-	img, _, err := image.Decode(file)
-	if err != nil {
-		return fmt.Errorf("failed to decode image: %w", err)
-	}
-
-	result, err := r.RemoveBackground(img)
-	if err != nil {
-		return err
-	}
-
-	outFile, err := os.Create(outputPath)
-	if err != nil {
-		return fmt.Errorf("failed to create output file: %w", err)
-	}
-
-	defer outFile.Close()
-
-	if err := png.Encode(outFile, result); err != nil {
-		return fmt.Errorf("failed to encode output image: %w", err)
-	}
-
-	return nil
+	wg.Wait()
 }
 
-// Close releases resources
-func (r *RemBG) Close() error {
-	if r.session != nil {
-		return r.session.Destroy()
-	}
-	if r.inputTensor != nil {
-		return r.inputTensor.Destroy()
-	}
-	if r.outputs != nil {
-		for _, output := range r.outputs {
-			return output.Destroy()
+// Optimized resize with flat arrays instead of 2D slices
+func (r *RemBG) resizeGrayBlur5O(src *image.Gray, newW, newH int) *image.Gray {
+	srcB := src.Bounds()
+	dst := image.NewGray(image.Rect(0, 0, newW, newH))
+
+	xRatio := float64(srcB.Dx()) / float64(newW)
+	yRatio := float64(srcB.Dy()) / float64(newH)
+
+	// Get buffer from pool
+	bufSize := newW * newH
+	buf := r.blurPool.get(bufSize)
+	defer r.blurPool.put(buf)
+
+	tmp := buf.tmp
+	hPass := buf.hPass
+
+	for y := range newH {
+		sy := yRatio * float64(y)
+		y0 := int(sy)
+		y1 := min(y0+1, srcB.Dy()-1)
+		yLerp := sy - float64(y0)
+
+		for x := range newW {
+			sx := xRatio * float64(x)
+			x0 := int(sx)
+			x1 := min(x0+1, srcB.Dx()-1)
+			xLerp := sx - float64(x0)
+
+			p00 := float64(src.GrayAt(x0, y0).Y)
+			p10 := float64(src.GrayAt(x1, y0).Y)
+			p01 := float64(src.GrayAt(x0, y1).Y)
+			p11 := float64(src.GrayAt(x1, y1).Y)
+
+			top := p00 + (p10-p00)*xLerp
+			bottom := p01 + (p11-p01)*xLerp
+			tmp[y*newW+x] = uint8(top + (bottom-top)*yLerp)
 		}
 	}
-	return nil
+
+	w, h := newW, newH
+	window := 5
+	radius := window / 2
+
+	for y := range h {
+		sum := 0
+		rowOffset := y * w
+		for k := -radius; k <= radius; k++ {
+			xi := clamp(k, 0, w-1)
+			sum += int(tmp[rowOffset+xi])
+		}
+		hPass[rowOffset] = uint8(sum / window)
+
+		for x := 1; x < w; x++ {
+			out := min(x+radius, w-1)
+			in := max(x-radius-1, 0)
+			sum += int(tmp[rowOffset+out]) - int(tmp[rowOffset+in])
+			hPass[rowOffset+x] = uint8(sum / window)
+		}
+	}
+
+	for x := range w {
+		sum := 0
+		for k := -radius; k <= radius; k++ {
+			yi := clamp(k, 0, h-1)
+			sum += int(hPass[yi*w+x])
+		}
+		dst.SetGray(x, 0, color.Gray{Y: uint8(sum / window)})
+
+		for y := 1; y < h; y++ {
+			out := min(y+radius, h-1)
+			in := max(y-radius-1, 0)
+			sum += int(hPass[out*w+x]) - int(hPass[in*w+x])
+			dst.SetGray(x, y, color.Gray{Y: uint8(sum / window)})
+		}
+	}
+
+	return dst
 }
 
-func downloadModel(url, filepath string) error {
-	resp, err := http.Get(url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("bad status: %s", resp.Status)
-	}
-
-	out, err := os.Create(filepath)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, resp.Body)
+func (r *RemBG) RunInference(input []ort.Value, output []ort.Value) error {
+	r.sessionMu.Lock()
+	err := r.session.Run(input, output)
+	r.sessionMu.Unlock()
 	return err
 }
 
-func refineMask(mask *image.Gray) *image.Gray {
-	bounds := mask.Bounds()
-	refined := image.NewGray(bounds)
-
-	kernel := [5][5]int{
-		{1, 4, 6, 4, 1},
-		{4, 16, 24, 16, 4},
-		{6, 24, 36, 24, 6},
-		{4, 16, 24, 16, 4},
-		{1, 4, 6, 4, 1},
+func clamp(v, min, max int) int {
+	if v < min {
+		return min
 	}
-	kernelSum := 256
-
-	for y := bounds.Min.Y + 2; y < bounds.Max.Y-2; y++ {
-		for x := bounds.Min.X + 2; x < bounds.Max.X-2; x++ {
-			sum := 0
-			for ky := -2; ky <= 2; ky++ {
-				for kx := -2; kx <= 2; kx++ {
-					sum += int(mask.GrayAt(x+kx, y+ky).Y) * kernel[ky+2][kx+2]
-				}
-			}
-			v := uint8(sum / kernelSum)
-			refined.SetGray(x, y, color.Gray{Y: v})
-		}
+	if v > max {
+		return max
 	}
-
-	return refined
+	return v
 }
 
 func otsuThreshold(data []float32) float32 {
 	hist := make([]int, 256)
 	for _, v := range data {
-		// Apply sigmoid first
-		s := 1.0 / (1.0 + float32(math.Exp(float64(-v))))
+		s := sigmoidLUT[int((v+6.0)/12.0*255.0)]
 		val := int(s * 255.0)
 		val = max(val, 0)
 		val = min(val, 255)
