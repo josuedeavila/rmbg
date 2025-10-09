@@ -72,7 +72,7 @@ func createSession(modelPath string) (*ort.DynamicAdvancedSession, error) {
 }
 
 // NewRemBG initializes ONNX session with memory pooling
-func NewRemBG(modelPath string) (*RemBG, error) {
+func New(modelPath string) (*RemBG, error) {
 	session, err := createSession(modelPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ONNX session: %w", err)
