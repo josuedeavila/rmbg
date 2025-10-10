@@ -62,7 +62,7 @@ func createSession(config *Config) (*ort.DynamicAdvancedSession, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session options: %w", err)
 	}
-	func() {
+	defer func() {
 		_ = options.Destroy()
 	}()
 
