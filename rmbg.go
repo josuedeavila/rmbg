@@ -213,19 +213,6 @@ func blendParallel(dst *image.RGBA, src image.Image, mask *image.Gray) {
 				}
 			}
 		})
-
-		wg.Go(func() {
-			for y := startY; y < endY; y++ {
-				for x := bounds.Min.X; x < bounds.Max.X; x++ {
-					rv, gv, bv, _ := src.At(x, y).RGBA()
-					alpha := float64(mask.GrayAt(x, y).Y) / 255.0
-					rOut := uint8(alpha*float64(rv>>8) + (1-alpha)*255)
-					gOut := uint8(alpha*float64(gv>>8) + (1-alpha)*255)
-					bOut := uint8(alpha*float64(bv>>8) + (1-alpha)*255)
-					dst.SetRGBA(x, y, color.RGBA{R: rOut, G: gOut, B: bOut, A: 255})
-				}
-			}
-		})
 	}
 
 	wg.Wait()
