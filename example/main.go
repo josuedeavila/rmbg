@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/disintegration/imaging"
 	"github.com/josuedeavila/rmbg"
@@ -27,21 +28,26 @@ func main() {
 		panic(fmt.Errorf("error opening image: %w", err))
 	}
 
+	start := time.Now()
 	newImage, err := engine.RemoveBackground(img)
 	if err != nil {
-		panic(fmt.Errorf("error removing background: %w", err))
+		panic(fmt.Errorf("error cropping image: %w", err))
 	}
+	fmt.Printf("time for removing background: %v\n", time.Since(start))
 
-	newImage, err = engine.SmartCrop(newImage, &rmbg.CropConfig{
+	start = time.Now()
+	copped, err := engine.SmartCropFromMask(newImage, rmbg.AutoMask, &rmbg.CropConfig{
+		Margin:       10,
 		SquareCrop:   true,
-		MinThreshold: 200,
+		MinThreshold: 100,
 	})
 	if err != nil {
 		panic(fmt.Errorf("error cropping image: %w", err))
 	}
+	fmt.Printf("time for cropping image: %v\n", time.Since(start))
 
 	outputPath := "output.jpg"
-	err = imaging.Save(newImage, outputPath)
+	err = imaging.Save(copped, outputPath)
 	if err != nil {
 		panic(fmt.Errorf("error saving image: %w", err))
 	}

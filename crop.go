@@ -44,9 +44,6 @@ func (r *RemBG) SmartCrop(img image.Image, config *CropConfig) (image.Image, err
 		r.tensorPool.putOutput(outputTensor)
 	}()
 
-	bounds := img.Bounds()
-	origW, origH := bounds.Dx(), bounds.Dy()
-
 	resized := imaging.Resize(img, inputSize, inputSize, imaging.Linear)
 	nrgba := imaging.Clone(resized)
 	pix := nrgba.Pix
@@ -84,64 +81,7 @@ func (r *RemBG) SmartCrop(img image.Image, config *CropConfig) (image.Image, err
 		maskImg.SetGray(i%inputSize, i/inputSize, color.Gray{Y: val})
 	}
 
-	objBounds := detectObjectBounds(maskImg, config.MinThreshold)
-	if objBounds == nil {
-		return nil, fmt.Errorf("no object detected in image")
-	}
-
-	scaleX := float64(origW) / float64(inputSize)
-	scaleY := float64(origH) / float64(inputSize)
-
-	scaledBounds := &objectBounds{
-		MinX: int(float64(objBounds.MinX) * scaleX),
-		MinY: int(float64(objBounds.MinY) * scaleY),
-		MaxX: int(float64(objBounds.MaxX) * scaleX),
-		MaxY: int(float64(objBounds.MaxY) * scaleY),
-	}
-	scaledBounds.Width = scaledBounds.MaxX - scaledBounds.MinX
-	scaledBounds.Height = scaledBounds.MaxY - scaledBounds.MinY
-	scaledBounds.CenterX = scaledBounds.MinX + scaledBounds.Width/2
-	scaledBounds.CenterY = scaledBounds.MinY + scaledBounds.Height/2
-
-	margin := config.Margin
-	if config.MarginPercent > 0 {
-		marginX := int(float64(scaledBounds.Width) * config.MarginPercent)
-		marginY := int(float64(scaledBounds.Height) * config.MarginPercent)
-		margin = max(marginX, marginY)
-	}
-
-	cropMinX := max(0, scaledBounds.MinX-margin)
-	cropMinY := max(0, scaledBounds.MinY-margin)
-	cropMaxX := min(origW, scaledBounds.MaxX+margin)
-	cropMaxY := min(origH, scaledBounds.MaxY+margin)
-
-	if config.SquareCrop {
-		cropW := cropMaxX - cropMinX
-		cropH := cropMaxY - cropMinY
-		if cropW > cropH {
-			diff := cropW - cropH
-			cropMinY = max(0, cropMinY-diff/2)
-			cropMaxY = min(origH, cropMaxY+diff/2)
-		} else if cropH > cropW {
-			diff := cropH - cropW
-			cropMinX = max(0, cropMinX-diff/2)
-			cropMaxX = min(origW, cropMaxX+diff/2)
-		}
-	}
-
-	cropW := cropMaxX - cropMinX
-	cropH := cropMaxY - cropMinY
-	output := image.NewRGBA(image.Rect(0, 0, cropW, cropH))
-
-	for y := range cropH {
-		for x := range cropW {
-			srcX := cropMinX + x
-			srcY := cropMinY + y
-			output.Set(x, y, img.At(srcX, srcY))
-		}
-	}
-
-	return output, nil
+	return crop(img, maskImg, config)
 }
 
 func detectObjectBounds(mask *image.Gray, minThreshold uint8) *objectBounds {
@@ -184,4 +124,56 @@ func detectObjectBounds(mask *image.Gray, minThreshold uint8) *objectBounds {
 		CenterX: minX + (maxX-minX)/2,
 		CenterY: minY + (maxY-minY)/2,
 	}
+}
+
+// SmartCropFromMask performs a smart crop using an existing mask
+func (engine *RemBG) SmartCropFromMask(img image.Image, maskFunc Mask, config *CropConfig) (image.Image, error) {
+	if config == nil {
+		config = &CropConfig{
+			Margin:       20,
+			MinThreshold: 10,
+		}
+	}
+
+	return crop(img, maskFunc(img), config)
+}
+
+func crop(img image.Image, maskImg *image.Gray, config *CropConfig) (image.Image, error) {
+	bounds := img.Bounds()
+	origW, origH := bounds.Dx(), bounds.Dy()
+	objBounds := detectObjectBounds(maskImg, config.MinThreshold)
+	if objBounds == nil {
+		return nil, fmt.Errorf("no object detected in image")
+	}
+
+	scaledBounds := objBounds // mask and img are same size
+
+	margin := config.Margin
+	if config.MarginPercent > 0 {
+		marginX := int(float64(scaledBounds.Width) * config.MarginPercent)
+		marginY := int(float64(scaledBounds.Height) * config.MarginPercent)
+		margin = max(marginX, marginY)
+	}
+
+	cropMinX := max(0, scaledBounds.MinX-margin)
+	cropMinY := max(0, scaledBounds.MinY-margin)
+	cropMaxX := min(origW, scaledBounds.MaxX+margin)
+	cropMaxY := min(origH, scaledBounds.MaxY+margin)
+
+	if config.SquareCrop {
+		cropW := cropMaxX - cropMinX
+		cropH := cropMaxY - cropMinY
+		if cropW > cropH {
+			diff := cropW - cropH
+			cropMinY = max(0, cropMinY-diff/2)
+			cropMaxY = min(origH, cropMaxY+diff/2)
+		} else if cropH > cropW {
+			diff := cropH - cropW
+			cropMinX = max(0, cropMinX-diff/2)
+			cropMaxX = min(origW, cropMaxX+diff/2)
+		}
+	}
+
+	rect := image.Rect(cropMinX, cropMinY, cropMaxX, cropMaxY)
+	return imaging.Crop(img, rect), nil
 }
