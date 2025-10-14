@@ -24,18 +24,26 @@ func main() {
 	inputPath := "input.jpg"
 	img, err := imaging.Open(inputPath)
 	if err != nil {
-		panic(fmt.Errorf("erro ao abrir imagem: %w", err))
+		panic(fmt.Errorf("error opening image: %w", err))
 	}
 
 	newImage, err := engine.RemoveBackground(img)
 	if err != nil {
-		panic(fmt.Errorf("erro ao remover fundo: %w", err))
+		panic(fmt.Errorf("error removing background: %w", err))
+	}
+
+	newImage, err = engine.SmartCrop(newImage, &rmbg.CropConfig{
+		SquareCrop:   true,
+		MinThreshold: 200,
+	})
+	if err != nil {
+		panic(fmt.Errorf("error cropping image: %w", err))
 	}
 
 	outputPath := "output.jpg"
 	err = imaging.Save(newImage, outputPath)
 	if err != nil {
-		panic(fmt.Errorf("erro ao salvar imagem: %w", err))
+		panic(fmt.Errorf("error saving image: %w", err))
 	}
 
 }
