@@ -32,7 +32,7 @@ type objectBounds struct {
 func (r *RemBG) SmartCrop(img image.Image, config *CropConfig) (image.Image, error) {
 	if config == nil {
 		config = &CropConfig{
-			Margin:       20,
+			Margin:       10,
 			MinThreshold: 10,
 		}
 	}
@@ -80,8 +80,11 @@ func (r *RemBG) SmartCrop(img image.Image, config *CropConfig) (image.Image, err
 		}
 		maskImg.SetGray(i%inputSize, i/inputSize, color.Gray{Y: val})
 	}
-
-	return crop(img, maskImg, config)
+	bounds := img.Bounds()
+	origW, origH := bounds.Dx(), bounds.Dy()
+	return crop(img, maskImg, config,
+		float64(origW)/float64(inputSize),
+		float64(origH)/float64(inputSize))
 }
 
 func detectObjectBounds(mask *image.Gray, minThreshold uint8) *objectBounds {
@@ -120,8 +123,8 @@ func detectObjectBounds(mask *image.Gray, minThreshold uint8) *objectBounds {
 		MaxX:    maxX,
 		MaxY:    maxY,
 		Width:   maxX - minX,
-		Height:  maxY - minY,
 		CenterX: minX + (maxX-minX)/2,
+		Height:  maxY - minY,
 		CenterY: minY + (maxY-minY)/2,
 	}
 }
@@ -135,31 +138,51 @@ func (engine *RemBG) SmartCropFromMask(img image.Image, maskFunc Mask, config *C
 		}
 	}
 
-	return crop(img, maskFunc(img), config)
+	return crop(img, maskFunc(img), config, 1.0, 1.0)
 }
 
-func crop(img image.Image, maskImg *image.Gray, config *CropConfig) (image.Image, error) {
-	bounds := img.Bounds()
-	origW, origH := bounds.Dx(), bounds.Dy()
+func crop(
+	img image.Image,
+	maskImg *image.Gray,
+	config *CropConfig,
+	scaleX, scaleY float64,
+) (image.Image, error) {
+	if maskImg == nil {
+		return nil, fmt.Errorf("mask image is nil")
+	}
+
 	objBounds := detectObjectBounds(maskImg, config.MinThreshold)
 	if objBounds == nil {
 		return nil, fmt.Errorf("no object detected in image")
 	}
 
-	scaledBounds := objBounds // mask and img are same size
+	bounds := img.Bounds()
+	origW, origH := bounds.Dx(), bounds.Dy()
 
+	// Scale from mask space to original space
+	scaled := &objectBounds{
+		MinX: int(float64(objBounds.MinX) * scaleX),
+		MinY: int(float64(objBounds.MinY) * scaleY),
+		MaxX: int(float64(objBounds.MaxX) * scaleX),
+		MaxY: int(float64(objBounds.MaxY) * scaleY),
+	}
+	scaled.Width = scaled.MaxX - scaled.MinX
+	scaled.Height = scaled.MaxY - scaled.MinY
+
+	// Calculate margin
 	margin := config.Margin
 	if config.MarginPercent > 0 {
-		marginX := int(float64(scaledBounds.Width) * config.MarginPercent)
-		marginY := int(float64(scaledBounds.Height) * config.MarginPercent)
-		margin = max(marginX, marginY)
+		marginX := int(float64(scaled.Width) * config.MarginPercent)
+		marginY := int(float64(scaled.Height) * config.MarginPercent)
+		margin = max(margin, max(marginX, marginY))
 	}
 
-	cropMinX := max(0, scaledBounds.MinX-margin)
-	cropMinY := max(0, scaledBounds.MinY-margin)
-	cropMaxX := min(origW, scaledBounds.MaxX+margin)
-	cropMaxY := min(origH, scaledBounds.MaxY+margin)
+	cropMinX := max(0, scaled.MinX-margin)
+	cropMinY := max(0, scaled.MinY-margin)
+	cropMaxX := min(origW, scaled.MaxX+margin)
+	cropMaxY := min(origH, scaled.MaxY+margin)
 
+	// Make square if requested
 	if config.SquareCrop {
 		cropW := cropMaxX - cropMinX
 		cropH := cropMaxY - cropMinY
