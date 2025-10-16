@@ -87,7 +87,7 @@ func (r *RemBG) SmartCrop(img image.Image, config *CropConfig) (image.Image, err
 		float64(origH)/float64(inputSize))
 }
 
-func detectObjectBounds(mask *image.Gray, minThreshold uint8) *objectBounds {
+func detectObjectBounds(mask *image.Gray, minThreshold uint8) (objectBounds, bool) {
 	bounds := mask.Bounds()
 	minX, minY := bounds.Max.X, bounds.Max.Y
 	maxX, maxY := 0, 0
@@ -97,27 +97,19 @@ func detectObjectBounds(mask *image.Gray, minThreshold uint8) *objectBounds {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			if mask.GrayAt(x, y).Y >= minThreshold {
 				foundPixel = true
-				if x < minX {
-					minX = x
-				}
-				if x > maxX {
-					maxX = x
-				}
-				if y < minY {
-					minY = y
-				}
-				if y > maxY {
-					maxY = y
-				}
+				minX = min(minX, x)
+				maxX = max(maxX, x)
+				minY = min(minY, y)
+				maxY = max(maxY, y)
 			}
 		}
 	}
 
 	if !foundPixel {
-		return nil
+		return objectBounds{}, false
 	}
 
-	return &objectBounds{
+	return objectBounds{
 		MinX:    minX,
 		MinY:    minY,
 		MaxX:    maxX,
@@ -126,7 +118,7 @@ func detectObjectBounds(mask *image.Gray, minThreshold uint8) *objectBounds {
 		CenterX: minX + (maxX-minX)/2,
 		Height:  maxY - minY,
 		CenterY: minY + (maxY-minY)/2,
-	}
+	}, true
 }
 
 // SmartCropFromMask performs a smart crop using an existing mask
@@ -151,8 +143,8 @@ func crop(
 		return nil, fmt.Errorf("mask image is nil")
 	}
 
-	objBounds := detectObjectBounds(maskImg, config.MinThreshold)
-	if objBounds == nil {
+	objBounds, found := detectObjectBounds(maskImg, config.MinThreshold)
+	if !found {
 		return nil, fmt.Errorf("no object detected in image")
 	}
 
