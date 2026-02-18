@@ -112,26 +112,29 @@ imaging.Save(cropped, "cropped.png")
 ### Using Custom Masks
 
 ```go
-// Use existing alpha channel
-result, err := engine.SmartCropFromMask(img, rmbg.MaskFromAlpha, &rmbg.CropConfig{
+// Define crop configuration
+cropConfig := &rmbg.CropConfig{
     Margin:       10,
     SquareCrop:   true,
-    MinThreshold: 100,
-})
+    MinThreshold: 20,
+}
+
+// Use existing alpha channel
+result, err := engine.SmartCropFromMask(img, rmbg.MaskFromAlpha, cropConfig)
 
 // Auto-detect best mask strategy
-result, err := engine.SmartCropFromMask(img, rmbg.AutoMask, config)
+result, err := engine.SmartCropFromMask(img, rmbg.AutoMask, cropConfig)
 
 // Detect edges
 result, err := engine.SmartCropFromMask(img, func(img image.Image) *image.Gray {
     return rmbg.MaskFromEdges(img, 200)
-}, config)
+}, cropConfig)
 
 // Detect background color
 result, err := engine.SmartCropFromMask(img, func(img image.Image) *image.Gray {
     bgColor := color.RGBA{R: 255, G: 255, B: 255, A: 255} // white
     return rmbg.MaskFromBackground(img, bgColor, 50)
-}, config)
+}, cropConfig)
 ```
 
 ## ⚙️ Configuration
