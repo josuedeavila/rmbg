@@ -50,9 +50,9 @@ func MaskFromAlpha(img image.Image) *image.Gray {
 
 	switch src := img.(type) {
 	case *image.RGBA:
-		return maskFromRGBA(src)
+		return maskFromImage(src.Pix, src.Stride, bounds)
 	case *image.NRGBA:
-		return maskFromNRGBA(src)
+		return maskFromImage(src.Pix, src.Stride, bounds)
 	case *image.Gray:
 		mask := image.NewGray(bounds)
 		for i := range mask.Pix {
@@ -71,36 +71,11 @@ func MaskFromAlpha(img image.Image) *image.Gray {
 	return mask
 }
 
-func maskFromRGBA(src *image.RGBA) *image.Gray {
-	bounds := src.Bounds()
+func maskFromImage(srcPix []uint8, srcStride int, bounds image.Rectangle) *image.Gray {
 	w, h := bounds.Dx(), bounds.Dy()
 	mask := image.NewGray(bounds)
 
-	// Acesso direto aos slices
-	srcPix := src.Pix
 	dstPix := mask.Pix
-	srcStride := src.Stride
-	dstStride := mask.Stride
-
-	for y := range h {
-		srcLine := srcPix[y*srcStride : y*srcStride+w*4]
-		dstLine := dstPix[y*dstStride : y*dstStride+w]
-
-		for x := range w {
-			dstLine[x] = srcLine[x*4+3]
-		}
-	}
-	return mask
-}
-
-func maskFromNRGBA(src *image.NRGBA) *image.Gray {
-	bounds := src.Bounds()
-	w, h := bounds.Dx(), bounds.Dy()
-	mask := image.NewGray(bounds)
-
-	srcPix := src.Pix
-	dstPix := mask.Pix
-	srcStride := src.Stride
 	dstStride := mask.Stride
 
 	for y := range h {
@@ -123,9 +98,9 @@ func MaskFromBackground(img image.Image, bg color.Color, tolerance float64) *ima
 
 	switch src := img.(type) {
 	case *image.RGBA:
-		return maskFromBackgroundRGBA(src, int64(bgR), int64(bgG), int64(bgB), toleranceSq)
+		return maskFromBackground(src.Pix, src.Stride, bounds, int64(bgR), int64(bgG), int64(bgB), toleranceSq)
 	case *image.NRGBA:
-		return maskFromBackgroundNRGBA(src, int64(bgR), int64(bgG), int64(bgB), toleranceSq)
+		return maskFromBackground(src.Pix, src.Stride, bounds, int64(bgR), int64(bgG), int64(bgB), toleranceSq)
 	}
 
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
@@ -145,47 +120,11 @@ func MaskFromBackground(img image.Image, bg color.Color, tolerance float64) *ima
 	return mask
 }
 
-func maskFromBackgroundRGBA(src *image.RGBA, bgR, bgG, bgB int64, toleranceSq float64) *image.Gray {
-	bounds := src.Bounds()
+func maskFromBackground(srcPix []uint8, srcStride int, bounds image.Rectangle, bgR, bgG, bgB int64, toleranceSq float64) *image.Gray {
 	w, h := bounds.Dx(), bounds.Dy()
 	mask := image.NewGray(bounds)
 
-	srcPix := src.Pix
 	dstPix := mask.Pix
-	srcStride := src.Stride
-	dstStride := mask.Stride
-
-	for y := range h {
-		srcLine := srcPix[y*srcStride : y*srcStride+w*4]
-		dstLine := dstPix[y*dstStride : y*dstStride+w]
-
-		for x := range w {
-			i := x * 4
-			r := int64(srcLine[i]) << 8
-			g := int64(srcLine[i+1]) << 8
-			b := int64(srcLine[i+2]) << 8
-
-			dr := r - bgR
-			dg := g - bgG
-			db := b - bgB
-			distSq := float64(dr*dr + dg*dg + db*db)
-
-			if distSq > toleranceSq {
-				dstLine[x] = 255
-			}
-		}
-	}
-	return mask
-}
-
-func maskFromBackgroundNRGBA(src *image.NRGBA, bgR, bgG, bgB int64, toleranceSq float64) *image.Gray {
-	bounds := src.Bounds()
-	w, h := bounds.Dx(), bounds.Dy()
-	mask := image.NewGray(bounds)
-
-	srcPix := src.Pix
-	dstPix := mask.Pix
-	srcStride := src.Stride
 	dstStride := mask.Stride
 
 	for y := range h {
@@ -265,9 +204,9 @@ func convertToGrayscale(img image.Image) *image.Gray {
 
 	switch src := img.(type) {
 	case *image.RGBA:
-		return convertRGBAToGray(src)
+		return convertToGray(src.Pix, src.Stride, bounds)
 	case *image.NRGBA:
-		return convertNRGBAToGray(src)
+		return convertToGray(src.Pix, src.Stride, bounds)
 	}
 
 	const (
@@ -287,39 +226,11 @@ func convertToGrayscale(img image.Image) *image.Gray {
 	return gray
 }
 
-func convertRGBAToGray(src *image.RGBA) *image.Gray {
-	bounds := src.Bounds()
+func convertToGray(srcPix []uint8, srcStride int, bounds image.Rectangle) *image.Gray {
 	w, h := bounds.Dx(), bounds.Dy()
 	gray := image.NewGray(bounds)
 
-	srcPix := src.Pix
 	dstPix := gray.Pix
-	srcStride := src.Stride
-	dstStride := gray.Stride
-
-	for y := range h {
-		srcLine := srcPix[y*srcStride : y*srcStride+w*4]
-		dstLine := dstPix[y*dstStride : y*dstStride+w]
-
-		for x := range w {
-			i := x * 4
-			r := uint32(srcLine[i])
-			g := uint32(srcLine[i+1])
-			b := uint32(srcLine[i+2])
-			dstLine[x] = uint8((299*r + 587*g + 114*b) / 1000)
-		}
-	}
-	return gray
-}
-
-func convertNRGBAToGray(src *image.NRGBA) *image.Gray {
-	bounds := src.Bounds()
-	w, h := bounds.Dx(), bounds.Dy()
-	gray := image.NewGray(bounds)
-
-	srcPix := src.Pix
-	dstPix := gray.Pix
-	srcStride := src.Stride
 	dstStride := gray.Stride
 
 	for y := range h {
