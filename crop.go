@@ -3,11 +3,8 @@ package rmbg
 import (
 	"fmt"
 	"image"
-	"image/color"
-	"math"
 
 	"github.com/disintegration/imaging"
-	ort "github.com/yalue/onnxruntime_go"
 )
 
 // CropConfig configures the behavior of the smart crop
@@ -37,48 +34,9 @@ func (r *RemBG) SmartCrop(img image.Image, config *CropConfig) (image.Image, err
 		}
 	}
 
-	inputTensor := r.tensorPool.getInput()
-	outputTensor := r.tensorPool.getOutput()
-	defer func() {
-		r.tensorPool.putInput(inputTensor)
-		r.tensorPool.putOutput(outputTensor)
-	}()
-
-	resized := imaging.Resize(img, inputSize, inputSize, imaging.Linear)
-	nrgba := imaging.Clone(resized)
-	pix := nrgba.Pix
-	stride := nrgba.Stride
-
-	inputData := inputTensor.GetData()
-	for y := range inputSize {
-		row := pix[y*stride : y*stride+inputSize*4]
-		for x := range inputSize {
-			base := x * 4
-			r := (float32(row[base+0])/255.0 - mean[0]) / std[0]
-			g := (float32(row[base+1])/255.0 - mean[1]) / std[1]
-			b := (float32(row[base+2])/255.0 - mean[2]) / std[2]
-			inputData[(0*inputSize+y)*inputSize+x] = r
-			inputData[(1*inputSize+y)*inputSize+x] = g
-			inputData[(2*inputSize+y)*inputSize+x] = b
-		}
-	}
-
-	err := r.RunInference([]ort.Value{inputTensor}, []ort.Value{outputTensor})
+	maskImg, err := r.predictMask(img)
 	if err != nil {
-		return nil, fmt.Errorf("inference failed: %w", err)
-	}
-
-	data := outputTensor.GetData()
-	maskImg := image.NewGray(image.Rect(0, 0, inputSize, inputSize))
-	threshold := otsuThreshold(data)
-
-	for i, v := range data {
-		s := 1.0 / (1.0 + float32(math.Exp(float64(-v))))
-		val := uint8(0)
-		if s > threshold {
-			val = 255
-		}
-		maskImg.SetGray(i%inputSize, i/inputSize, color.Gray{Y: val})
+		return nil, err
 	}
 	bounds := img.Bounds()
 	origW, origH := bounds.Dx(), bounds.Dy()

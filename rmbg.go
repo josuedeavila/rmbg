@@ -13,8 +13,8 @@ import (
 	ort "github.com/yalue/onnxruntime_go"
 )
 
-func init() {
-	for i := range 255 {
+func initializeEnv() {
+	for i := range 256 {
 		v := float32(i)/255.0*12.0 - 6.0
 		sigmoidLUT[i] = 1.0 / (1.0 + float32(math.Exp(float64(-v))))
 	}
@@ -29,6 +29,7 @@ const (
 )
 
 var (
+	initOnce   sync.Once
 	sigmoidLUT [256]float32
 	mean       = [3]float32{0.485, 0.456, 0.406}
 	std        = [3]float32{0.229, 0.224, 0.225}
@@ -110,6 +111,8 @@ func createSession(config *Config) (*ort.DynamicAdvancedSession, error) {
 
 // NewRemBG initializes ONNX session
 func New(config *Config) (*RemBG, error) {
+	initOnce.Do(initializeEnv)
+
 	session, err := createSession(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ONNX session: %w", err)
@@ -133,6 +136,21 @@ func (r *RemBG) Close() error {
 
 // RemoveBackground processes image with memory pooling
 func (r *RemBG) RemoveBackground(img image.Image) (image.Image, error) {
+	maskImg, err := r.predictMask(img)
+	if err != nil {
+		return nil, err
+	}
+
+	bounds := img.Bounds()
+	resizedMask := r.resizeGrayBlur5O(maskImg, bounds.Dx(), bounds.Dy())
+
+	output := image.NewRGBA(bounds)
+	blendParallel(output, img, resizedMask)
+
+	return output, nil
+}
+
+func (r *RemBG) predictMask(img image.Image) (*image.Gray, error) {
 	inputTensor := r.tensorPool.getInput()
 	outputTensor := r.tensorPool.getOutput()
 	defer func() {
@@ -170,22 +188,14 @@ func (r *RemBG) RemoveBackground(img image.Image) (image.Image, error) {
 
 	for i, v := range data {
 		s := 1.0 / (1.0 + float32(math.Exp(float64(-v))))
+		val := uint8(0)
 		if s > threshold {
-			s = 1.0
-		} else {
-			s = 0.0
+			val = 255
 		}
-		val := uint8(s * 255)
 		maskImg.SetGray(i%inputSize, i/inputSize, color.Gray{Y: val})
 	}
 
-	bounds := img.Bounds()
-	resizedMask := r.resizeGrayBlur5O(maskImg, bounds.Dx(), bounds.Dy())
-
-	output := image.NewRGBA(bounds)
-	blendParallel(output, img, resizedMask)
-
-	return output, nil
+	return maskImg, nil
 }
 
 func blendParallel(dst *image.RGBA, src image.Image, mask *image.Gray) {
