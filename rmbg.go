@@ -5,7 +5,6 @@ import (
 	"image"
 	"image/color"
 	"log"
-	"math"
 	"runtime"
 	"sync"
 
@@ -14,11 +13,6 @@ import (
 )
 
 func initializeEnv() {
-	for i := range 256 {
-		v := float32(i)/255.0*12.0 - 6.0
-		sigmoidLUT[i] = 1.0 / (1.0 + float32(math.Exp(float64(-v))))
-	}
-
 	if err := ort.InitializeEnvironment(); err != nil {
 		log.Panicf("failed to init ORT env: %v", err)
 	}
@@ -29,10 +23,9 @@ const (
 )
 
 var (
-	initOnce   sync.Once
-	sigmoidLUT [256]float32
-	mean       = [3]float32{0.485, 0.456, 0.406}
-	std        = [3]float32{0.229, 0.224, 0.225}
+	initOnce sync.Once
+	mean     = [3]float32{0.485, 0.456, 0.406}
+	std      = [3]float32{0.229, 0.224, 0.225}
 )
 
 // Config for RemBG
@@ -182,17 +175,15 @@ func (r *RemBG) predictMask(img image.Image) (*image.Gray, error) {
 		return nil, fmt.Errorf("inference failed: %w", err)
 	}
 
+	// The model's output node already emits per-pixel probabilities in [0, 1]:
+	// U2Net applies the sigmoid inside the exported graph. They are used as the
+	// alpha directly, so the soft edge the network predicts survives into the
+	// mask instead of being flattened away by a threshold.
 	data := outputTensor.GetData()
 	maskImg := image.NewGray(image.Rect(0, 0, inputSize, inputSize))
-	threshold := otsuThreshold(data)
 
 	for i, v := range data {
-		s := 1.0 / (1.0 + float32(math.Exp(float64(-v))))
-		val := uint8(0)
-		if s > threshold {
-			val = 255
-		}
-		maskImg.SetGray(i%inputSize, i/inputSize, color.Gray{Y: val})
+		maskImg.Pix[i] = uint8(min(max(v, 0), 1) * 255)
 	}
 
 	return maskImg, nil
@@ -320,43 +311,4 @@ func clamp(v, min, max int) int {
 		return max
 	}
 	return v
-}
-
-func otsuThreshold(data []float32) float32 {
-	hist := make([]int, 256)
-	for _, v := range data {
-		s := sigmoidLUT[int((v+6.0)/12.0*255.0)]
-		val := int(s * 255.0)
-		val = max(val, 0)
-		val = min(val, 255)
-		hist[val]++
-	}
-
-	total := len(data)
-	sum := 0
-	for t := range 255 {
-		sum += t * hist[t]
-	}
-
-	sumB, wB, wF, varMax, threshold := 0, 0, 0, 0.0, 0
-	for t := range 255 {
-		wB += hist[t]
-		if wB == 0 {
-			continue
-		}
-		wF = total - wB
-		if wF == 0 {
-			break
-		}
-		sumB += t * hist[t]
-		mB := float64(sumB) / float64(wB)
-		mF := float64(sum-sumB) / float64(wF)
-		varBetween := float64(wB) * float64(wF) * (mB - mF) * (mB - mF)
-		if varBetween > varMax {
-			varMax = varBetween
-			threshold = t
-		}
-	}
-
-	return float32(threshold) / 255.0
 }
