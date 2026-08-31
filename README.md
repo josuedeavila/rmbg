@@ -173,7 +173,8 @@ type CropConfig struct {
     // Margin as percentage of object dimensions (overrides Margin)
     MarginPercent float64
 
-    // Minimum mask value to consider as object (0-255)
+    // Minimum mask value to consider as object (0-255). The predicted mask
+    // holds the model's per-pixel confidence, so this is a confidence floor.
     MinThreshold uint8
 
     // Force square crop using largest dimension

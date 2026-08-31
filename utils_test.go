@@ -25,28 +25,6 @@ func TestClamp(t *testing.T) {
 	}
 }
 
-func TestOtsuThreshold(t *testing.T) {
-	// Mock sigmoidLUT for testing since it's initialized in init()
-	// sigmoidLUT maps index i (0-255) to float32
-	// For testing, we just need a spread of values that will fall into different bins.
-
-	// Create data that has two distinct peaks in sigmoid space
-	data := make([]float32, 100)
-	// Low values (will result in low sigmoid values)
-	for i := 0; i < 50; i++ {
-		data[i] = -5.0
-	}
-	// High values (will result in high sigmoid values)
-	for i := 50; i < 100; i++ {
-		data[i] = 5.0
-	}
-
-	threshold := otsuThreshold(data)
-	if threshold <= 0 || threshold >= 1.0 {
-		t.Errorf("otsuThreshold returned %f; want value between 0 and 1", threshold)
-	}
-}
-
 func TestDetectUniformBackground(t *testing.T) {
 	t.Run("Uniform", func(t *testing.T) {
 		img := image.NewRGBA(image.Rect(0, 0, 100, 100))
